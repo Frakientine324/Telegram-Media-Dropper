@@ -20,6 +20,7 @@ const router: IRouter = Router();
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_BATCH_SIZE = 80 * 1024 * 1024;
 const MAX_PHOTO_SIZE = 10 * 1024 * 1024;
+const MAX_FILES = 20;
 const MAX_CAPTION_LENGTH = 1024;
 const VIDEO_EXTENSIONS = new Set([
   ".3gp",
@@ -59,7 +60,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: MAX_FILE_SIZE,
-    files: 8,
+    files: MAX_FILES,
     fields: 1,
     fieldSize: MAX_CAPTION_LENGTH,
   },
@@ -79,14 +80,14 @@ const parseUploadBatch: RequestHandler = (req, res, next) => {
     return;
   }
 
-  upload.array("files", 8)(req, res, (error: unknown) => {
+  upload.array("files", MAX_FILES)(req, res, (error: unknown) => {
     if (error) {
       if (error instanceof MulterError && error.code === "LIMIT_FILE_SIZE") {
         res.status(413).json({ error: "Each photo or video must be 50 MB or smaller." });
         return;
       }
       if (error instanceof MulterError && error.code === "LIMIT_FILE_COUNT") {
-        res.status(400).json({ error: "Choose no more than 8 photos or videos." });
+        res.status(400).json({ error: `Choose no more than ${MAX_FILES} photos or videos.` });
         return;
       }
       res.status(400).json({
@@ -158,21 +159,28 @@ async function postTelegramJson<T>(
   return readTelegramResult<T>(response);
 }
 
-router.get("/telegram/status", async (_req, res): Promise<void> => {
+type TelegramReadiness = {
+  configured: boolean;
+  chatConfigured: boolean;
+  botConnected: boolean;
+  destinationAccessible: boolean;
+  diagnostic: string | null;
+};
+
+async function checkTelegramReadiness(): Promise<TelegramReadiness> {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
-  const status = {
+  const status: TelegramReadiness = {
     configured: Boolean(token),
     chatConfigured: Boolean(chatId),
     botConnected: false,
     destinationAccessible: false,
-    diagnostic: null as string | null,
+    diagnostic: null,
   };
 
   if (!token) {
     status.diagnostic = "Add the Telegram bot token in project secrets.";
-    res.json(GetTelegramStatusResponse.parse(status));
-    return;
+    return status;
   }
 
   try {
@@ -182,15 +190,13 @@ router.get("/telegram/status", async (_req, res): Promise<void> => {
     const me = await readTelegramResult<{ id: number }>(meResponse);
     if (!meResponse.ok || !me.ok || !me.result?.id) {
       status.diagnostic = "Telegram rejected the bot token. Check the saved bot token.";
-      res.json(GetTelegramStatusResponse.parse(status));
-      return;
+      return status;
     }
     status.botConnected = true;
 
     if (!chatId) {
       status.diagnostic = "Add a Telegram destination chat ID in project secrets.";
-      res.json(GetTelegramStatusResponse.parse(status));
-      return;
+      return status;
     }
 
     const chat = await postTelegramJson<{ id: number }>(token, "getChat", {
@@ -198,14 +204,34 @@ router.get("/telegram/status", async (_req, res): Promise<void> => {
     });
     if (!chat.ok || !chat.result?.id) {
       status.diagnostic = "The bot is connected but cannot access the destination chat.";
-      res.json(GetTelegramStatusResponse.parse(status));
-      return;
+      return status;
     }
     status.destinationAccessible = true;
   } catch {
     status.diagnostic = "Telegram could not be reached. Check the connection and try again.";
   }
 
+  return status;
+}
+
+const requireTelegramReady: RequestHandler = async (_req, res, next) => {
+  const status = await checkTelegramReadiness();
+  const ready =
+    status.configured &&
+    status.chatConfigured &&
+    status.botConnected &&
+    status.destinationAccessible;
+  if (!ready) {
+    res.status(503).json({
+      error: status.diagnostic ?? "The Telegram bot and destination chat are not ready.",
+    });
+    return;
+  }
+  next();
+};
+
+router.get("/telegram/status", async (_req, res): Promise<void> => {
+  const status = await checkTelegramReadiness();
   res.json(GetTelegramStatusResponse.parse(status));
 });
 
@@ -342,6 +368,7 @@ router.get("/inbox/:uploadId/media", async (req, res): Promise<void> => {
 router.post(
   "/uploads",
   limitUploadRate,
+  requireTelegramReady,
   parseUploadBatch,
   async (req, res): Promise<void> => {
     const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
@@ -358,8 +385,8 @@ router.post(
       return;
     }
     const caption = captionResult.data?.trim() ?? "";
-    if (files.length < 1 || files.length > 8) {
-      res.status(400).json({ error: "Choose between 1 and 8 photos or videos." });
+    if (files.length < 1 || files.length > MAX_FILES) {
+      res.status(400).json({ error: `Choose between 1 and ${MAX_FILES} photos or videos.` });
       return;
     }
     if (files.some((file) => !getMediaType(file))) {

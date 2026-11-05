@@ -9,7 +9,7 @@
 export interface UploadBatchInput {
   /**
      * @minItems 1
-     * @maxItems 8
+     * @maxItems 20
      */
   files: (Blob | File)[];
   /** @maxLength 1024 */

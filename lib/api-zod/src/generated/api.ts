@@ -95,7 +95,7 @@ export const GetInboxMediaResponse = zod.unknown()
 /**
  * @summary Send photos and videos to Telegram
  */
-export const sendUploadsBodyFilesMax = 8;
+export const sendUploadsBodyFilesMax = 20;
 
 export const sendUploadsBodyCaptionMax = 1024;
 

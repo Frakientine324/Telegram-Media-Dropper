@@ -29,7 +29,7 @@ import { Link, Route, Switch, useLocation, Router as WouterRouter } from 'wouter
 const queryClient = new QueryClient();
 const MAX_FILE = 50 * 1024 * 1024;
 const MAX_BATCH = 80 * 1024 * 1024;
-const MAX_FILES = 8;
+const MAX_FILES = 20;
 
 type FileOutcome = {
   status: 'sent' | 'failed' | 'unknown';
@@ -255,7 +255,7 @@ function UploadPage() {
             <div className="drop-art"><span className="drop-art-ring"><CloudUpload size={26} /></span><span className="art-spark spark-one" /><span className="art-spark spark-two" /></div>
             <h3>I-drop ang media dito</h3><p>o pumili mula sa iyong device</p>
             <button className="button button-secondary browse-button" onClick={() => fileInput.current?.click()} data-testid="button-browse"><Plus size={16} /> Pumili ng files</button>
-            <div className="drop-limits"><span>JPG, PNG, GIF, MP4</span><i /> hanggang 50 MB bawat file <i /> 80 MB bawat batch</div>
+          <div className="drop-limits"><span>JPG, PNG, GIF, MP4</span><i /> hanggang 50 MB bawat file <i /> 20 files / 80 MB bawat batch</div>
           </div>
           {notice && <div className={`inline-notice ${sendUploads.isError ? 'notice-error' : ''}`} role="status" data-testid="status-upload-notice"><CircleHelp size={15} />{notice}<button aria-label="Dismiss notice" onClick={() => setNotice('')}><X size={15} /></button></div>}
           {staged.length > 0 && <div className="staged-area">
@@ -280,7 +280,7 @@ function UploadPage() {
             <textarea id="caption" value={caption} maxLength={1024} onChange={(e) => setCaption(e.target.value)} placeholder="Magdagdag ng maikling mensahe sa team…" data-testid="input-caption" />
           </div>
           <div className="send-row">
-            <div className="send-note"><ShieldCheck size={15} /><span>Direktang ipinapadala sa inyong Telegram chat.</span></div>
+            <div className="send-note"><ShieldCheck size={15} /><span>Direktang ipinapadala sa inyong Telegram chat. Maaaring lumampas sa 15 segundo depende sa laki at koneksyon.</span></div>
             <button className="button button-primary send-button" disabled={!sendable.length || sendUploads.isPending || totalBytes > MAX_BATCH || !telegramReady} onClick={submit} data-testid="button-send">
               {sendUploads.isPending ? <><LoaderCircle className="spin" size={17} /> Ipinapadala…</> : sendable.some((entry) => entry.outcome?.status === 'failed')
                 ? <><RefreshCw size={16} /> Subukang muli ang {sendable.length} file <ArrowRight size={16} /></>
@@ -296,7 +296,7 @@ function UploadPage() {
             <div className="step"><span>2</span><div><strong>Ipadala nang sabay</strong><small>Bawat file ay may sariling resulta.</small></div></div>
             <div className="step"><span>3</span><div><strong>Hanapin sa inbox</strong><small>Balikan at i-preview anumang oras.</small></div></div>
           </div><Link href="/inbox" className="text-action inbox-link" data-testid="link-view-inbox">Buksan ang sent inbox <ArrowRight size={14} /></Link></div>
-          <div className="limits-card"><div className="limits-title"><CircleHelp size={15} /><strong>Mga limit</strong></div><p>1–8 files bawat batch. 50 MB bawat file, hanggang 80 MB lahat-lahat.</p><p>Ang malalaking larawan ay ipinapadala bilang dokumento para mapanatili ang kalidad.</p></div>
+          <div className="limits-card"><div className="limits-title"><CircleHelp size={15} /><strong>Mga limit</strong></div><p>1–20 files bawat batch. 50 MB bawat file, hanggang 80 MB lahat-lahat.</p><p>Ang malalaking larawan ay ipinapadala bilang dokumento para mapanatili ang kalidad.</p></div>
         </aside>
       </div>
     </div>
