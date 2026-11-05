@@ -1,0 +1,16 @@
+{
+  "framework": "vite",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "buildCommand": "pnpm --filter @workspace/telegram-drop run build",
+  "outputDirectory": "artifacts/telegram-drop/dist/public",
+  "rewrites": [
+    {
+      "source": "/inbox",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/inbox/",
+      "destination": "/index.html"
+    }
+  ]
+}

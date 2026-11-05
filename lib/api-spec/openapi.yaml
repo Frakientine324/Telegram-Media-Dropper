@@ -10,6 +10,10 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: telegram
+    description: Telegram connection and media delivery
+  - name: inbox
+    description: Sent media history
 paths:
   /healthz:
     get:
@@ -24,6 +28,152 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /telegram/status:
+    get:
+      operationId: getTelegramStatus
+      tags: [telegram]
+      summary: Verify the Telegram bot and destination chat
+      responses:
+        "200":
+          description: Telegram configuration and live connection status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TelegramStatus"
+  /inbox:
+    get:
+      operationId: getInbox
+      tags: [inbox]
+      summary: List recently sent media
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 120
+      responses:
+        "200":
+          description: Recent sent media
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxResponse"
+  /inbox/stats:
+    get:
+      operationId: getInboxStats
+      tags: [inbox]
+      summary: Get sent media totals
+      responses:
+        "200":
+          description: Upload totals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxStats"
+  /inbox/{uploadId}:
+    delete:
+      operationId: deleteInboxUpload
+      tags: [inbox]
+      summary: Remove an item from the website inbox
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Inbox item removed
+        "400":
+          description: Invalid inbox item ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Inbox item not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /inbox/{uploadId}/media:
+    get:
+      operationId: getInboxMedia
+      tags: [inbox]
+      summary: Stream a sent media item from Telegram
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Media content
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+            video/*:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Media item not found
+  /uploads:
+    post:
+      operationId: sendUploads
+      tags: [telegram]
+      summary: Send photos and videos to Telegram
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/UploadBatchInput"
+      responses:
+        "200":
+          description: Batch send outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadBatchResult"
+        "400":
+          description: Invalid upload batch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "413":
+          description: Upload exceeds the supported size limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Upload rate limit reached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Telegram is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +183,119 @@ components:
           type: string
       required:
         - status
+    TelegramStatus:
+      type: object
+      properties:
+        configured:
+          type: boolean
+        chatConfigured:
+          type: boolean
+        botConnected:
+          type: boolean
+        destinationAccessible:
+          type: boolean
+        diagnostic:
+          type: [string, "null"]
+      required:
+        - configured
+        - chatConfigured
+        - botConnected
+        - destinationAccessible
+        - diagnostic
+    UploadBatchInput:
+      type: object
+      properties:
+        files:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items:
+            type: string
+            format: binary
+        caption:
+          type: string
+          maxLength: 1024
+      required: [files]
+    UploadItem:
+      type: object
+      properties:
+        batchIndex:
+          type: integer
+          minimum: 0
+        id:
+          type: string
+          format: uuid
+        fileName:
+          type: string
+        mediaType:
+          type: string
+          enum: [photo, video]
+        caption:
+          type: [string, "null"]
+        sizeBytes:
+          type: integer
+        telegramMessageId:
+          type: integer
+        telegramFileId:
+          type: string
+        sentAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - fileName
+        - mediaType
+        - caption
+        - sizeBytes
+        - telegramMessageId
+        - telegramFileId
+        - sentAt
+    UploadFailure:
+      type: object
+      properties:
+        batchIndex:
+          type: integer
+          minimum: 0
+        fileName:
+          type: string
+        error:
+          type: string
+        delivered:
+          type: [boolean, "null"]
+          description: True if Telegram accepted the file, false if it rejected it, null if delivery could not be confirmed.
+      required: [batchIndex, fileName, error, delivered]
+    UploadBatchResult:
+      type: object
+      properties:
+        sent:
+          type: array
+          items:
+            $ref: "#/components/schemas/UploadItem"
+        failed:
+          type: array
+          items:
+            $ref: "#/components/schemas/UploadFailure"
+      required: [sent, failed]
+    InboxResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/UploadItem"
+      required: [items]
+    InboxStats:
+      type: object
+      properties:
+        totalSent:
+          type: integer
+        sentToday:
+          type: integer
+      required: [totalSent, sentToday]
+    ApiError:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
 

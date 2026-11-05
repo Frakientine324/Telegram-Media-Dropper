@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Telegram Drop"
+description = "A shared media uploader for sending photos and videos to a Telegram chat, with a searchable inbox of sent files."
+version = "1.0.0"
+id = "artifacts/telegram-drop"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18350
+
+[services.development]
+run = "pnpm --filter @workspace/telegram-drop run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/telegram-drop", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/telegram-drop/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18350"
+BASE_PATH = "/"
