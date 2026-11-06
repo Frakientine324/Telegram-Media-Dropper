@@ -1,0 +1,43 @@
+services:
+  telegram-bot-api:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?Set TELEGRAM_API_ID in .env}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?Set TELEGRAM_API_HASH in .env}
+    expose:
+      - "8081"
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+    networks:
+      - telegram-api
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - telegram-bot-api
+    environment:
+      TELEGRAM_API_DOMAIN: ${TELEGRAM_API_DOMAIN:?Set TELEGRAM_API_DOMAIN in .env}
+      TELEGRAM_API_USERNAME: ${TELEGRAM_API_USERNAME:?Set TELEGRAM_API_USERNAME in .env}
+      TELEGRAM_API_PASSWORD_HASH: ${TELEGRAM_API_PASSWORD_HASH:?Set TELEGRAM_API_PASSWORD_HASH in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - telegram-api
+
+networks:
+  telegram-api:
+
+volumes:
+  telegram-bot-api-data:
+  caddy-data:
+  caddy-config:

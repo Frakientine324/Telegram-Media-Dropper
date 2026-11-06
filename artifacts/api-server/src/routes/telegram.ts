@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { extname } from "node:path";
+import { mkdirSync, openAsBlob } from "node:fs";
+import { unlink } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { tmpdir } from "node:os";
+import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { Router, type IRouter, type RequestHandler } from "express";
 import multer, { MulterError } from "multer";
 import { count, desc, eq, gte, ilike, or } from "drizzle-orm";
@@ -17,11 +21,26 @@ import { db, telegramUploadsTable } from "@workspace/db";
 
 const router: IRouter = Router();
 
-const MAX_FILE_SIZE = 50 * 1024 * 1024;
-const MAX_BATCH_SIZE = 80 * 1024 * 1024;
+const STANDARD_MAX_FILE_SIZE = 50 * 1024 * 1024;
+const LOCAL_MAX_FILE_SIZE = 500 * 1024 * 1024;
+const TELEGRAM_BOT_API_BASE_URL =
+  process.env.TELEGRAM_BOT_API_BASE_URL?.trim().replace(/\/+$/, "") || "https://api.telegram.org";
+const TELEGRAM_LOCAL_API_MODE =
+  process.env.TELEGRAM_LOCAL_API_MODE?.trim().toLowerCase() === "true";
+const TELEGRAM_BOT_API_DATA_DIR =
+  process.env.TELEGRAM_BOT_API_DATA_DIR?.trim().replace(/\/+$/, "") ||
+  "/var/lib/telegram-bot-api";
+const MAX_FILE_SIZE =
+  TELEGRAM_LOCAL_API_MODE && process.env.TELEGRAM_BOT_API_BASE_URL?.trim()
+    ? LOCAL_MAX_FILE_SIZE
+    : STANDARD_MAX_FILE_SIZE;
+const MAX_REQUEST_SIZE = MAX_FILE_SIZE;
 const MAX_PHOTO_SIZE = 10 * 1024 * 1024;
-const MAX_FILES = 20;
+const MAX_FILES_PER_REQUEST = 1;
 const MAX_CAPTION_LENGTH = 1024;
+const MAX_UPLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+const TEMP_UPLOAD_DIR = join(tmpdir(), "telegram-drop-uploads");
+mkdirSync(TEMP_UPLOAD_DIR, { recursive: true });
 const VIDEO_EXTENSIONS = new Set([
   ".3gp",
   ".avi",
@@ -57,10 +76,13 @@ function getMediaType(file: Express.Multer.File): "photo" | "video" | null {
 }
 
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: TEMP_UPLOAD_DIR,
+    filename: (_req, _file, callback) => callback(null, randomUUID()),
+  }),
   limits: {
     fileSize: MAX_FILE_SIZE,
-    files: MAX_FILES,
+    files: MAX_FILES_PER_REQUEST,
     fields: 1,
     fieldSize: MAX_CAPTION_LENGTH,
   },
@@ -75,19 +97,23 @@ const upload = multer({
 
 const parseUploadBatch: RequestHandler = (req, res, next) => {
   const contentLength = Number(req.headers["content-length"] ?? 0);
-  if (contentLength > MAX_BATCH_SIZE + 1024 * 1024) {
-    res.status(413).json({ error: "Keep each batch under 80 MB." });
+  if (contentLength > MAX_REQUEST_SIZE + 1024 * 1024) {
+    res.status(413).json({
+      error: `Each upload request must stay under ${Math.round(MAX_FILE_SIZE / (1024 * 1024))} MB.`,
+    });
     return;
   }
 
-  upload.array("files", MAX_FILES)(req, res, (error: unknown) => {
+  upload.array("files", MAX_FILES_PER_REQUEST)(req, res, (error: unknown) => {
     if (error) {
       if (error instanceof MulterError && error.code === "LIMIT_FILE_SIZE") {
-        res.status(413).json({ error: "Each photo or video must be 50 MB or smaller." });
+        res.status(413).json({
+          error: `Each photo or video must be ${Math.round(MAX_FILE_SIZE / (1024 * 1024))} MB or smaller.`,
+        });
         return;
       }
       if (error instanceof MulterError && error.code === "LIMIT_FILE_COUNT") {
-        res.status(400).json({ error: `Choose no more than ${MAX_FILES} photos or videos.` });
+        res.status(400).json({ error: "Upload one photo or video per request." });
         return;
       }
       res.status(400).json({
@@ -99,8 +125,25 @@ const parseUploadBatch: RequestHandler = (req, res, next) => {
   });
 };
 
+const cleanupUploadedFiles: RequestHandler = (req, res, next) => {
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+    for (const file of files) {
+      void unlink(file.path).catch((error: unknown) => {
+        req.log.warn({ err: error, fileName: file.originalname }, "Could not remove temporary upload");
+      });
+    }
+  };
+  res.once("finish", cleanup);
+  res.once("close", cleanup);
+  next();
+};
+
 const uploadWindowMs = 60_000;
-const uploadLimitPerMinute = 10;
+const uploadLimitPerMinute = 20;
 const uploadAttempts = new Map<string, { startedAt: number; count: number }>();
 const limitUploadRate: RequestHandler = (req, res, next) => {
   const now = Date.now();
@@ -119,7 +162,7 @@ const limitUploadRate: RequestHandler = (req, res, next) => {
 
   if (bucket.count >= uploadLimitPerMinute) {
     res.setHeader("Retry-After", "60");
-    res.status(429).json({ error: "Too many upload batches. Try again in a minute." });
+    res.status(429).json({ error: "Too many files uploaded. Try again in a minute." });
     return;
   }
 
@@ -128,7 +171,36 @@ const limitUploadRate: RequestHandler = (req, res, next) => {
 };
 
 function telegramEndpoint(token: string, method: string): string {
-  return `https://api.telegram.org/bot${token}/${method}`;
+  return `${TELEGRAM_BOT_API_BASE_URL}/bot${token}/${method}`;
+}
+
+function telegramRequestHeaders(headers: Record<string, string> = {}): Record<string, string> {
+  const username = process.env.TELEGRAM_BOT_API_USERNAME?.trim();
+  const password = process.env.TELEGRAM_BOT_API_PASSWORD;
+  if (!process.env.TELEGRAM_BOT_API_BASE_URL?.trim() || !username || !password) {
+    return headers;
+  }
+  const authorization = Buffer.from(`${username}:${password}`).toString("base64");
+  return { ...headers, Authorization: `Basic ${authorization}` };
+}
+
+function telegramFileUrl(token: string, filePath: string): string | null {
+  if (filePath.includes("..")) return null;
+  if (TELEGRAM_LOCAL_API_MODE && isAbsolute(filePath)) {
+    const relativePath = relative(TELEGRAM_BOT_API_DATA_DIR, filePath);
+    if (
+      !relativePath ||
+      relativePath === ".." ||
+      relativePath.startsWith(`..${sep}`) ||
+      isAbsolute(relativePath)
+    ) {
+      return null;
+    }
+    const encodedPath = relativePath.split(sep).map(encodeURIComponent).join("/");
+    return `${TELEGRAM_BOT_API_BASE_URL}/local-files/${encodedPath}`;
+  }
+  const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
+  return `${TELEGRAM_BOT_API_BASE_URL}/file/bot${token}/${encodedPath}`;
 }
 
 type TelegramResult<T> = {
@@ -152,7 +224,7 @@ async function postTelegramJson<T>(
 ): Promise<TelegramResult<T>> {
   const response = await fetch(telegramEndpoint(token, method), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: telegramRequestHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(values),
     signal: AbortSignal.timeout(12_000),
   });
@@ -164,6 +236,7 @@ type TelegramReadiness = {
   chatConfigured: boolean;
   botConnected: boolean;
   destinationAccessible: boolean;
+  maxFileSizeBytes: number;
   diagnostic: string | null;
 };
 
@@ -175,8 +248,21 @@ async function checkTelegramReadiness(): Promise<TelegramReadiness> {
     chatConfigured: Boolean(chatId),
     botConnected: false,
     destinationAccessible: false,
+    maxFileSizeBytes: MAX_FILE_SIZE,
     diagnostic: null,
   };
+
+  if (TELEGRAM_LOCAL_API_MODE && !process.env.TELEGRAM_BOT_API_BASE_URL?.trim()) {
+    status.diagnostic = "Add the local Telegram Bot API server URL to the API server settings.";
+    return status;
+  }
+  if (
+    process.env.TELEGRAM_BOT_API_BASE_URL?.trim() &&
+    (!process.env.TELEGRAM_BOT_API_USERNAME?.trim() || !process.env.TELEGRAM_BOT_API_PASSWORD)
+  ) {
+    status.diagnostic = "Add the local Telegram Bot API proxy credentials to server secrets.";
+    return status;
+  }
 
   if (!token) {
     status.diagnostic = "Add the Telegram bot token in project secrets.";
@@ -185,6 +271,7 @@ async function checkTelegramReadiness(): Promise<TelegramReadiness> {
 
   try {
     const meResponse = await fetch(telegramEndpoint(token, "getMe"), {
+      headers: telegramRequestHeaders(),
       signal: AbortSignal.timeout(12_000),
     });
     const me = await readTelegramResult<{ id: number }>(meResponse);
@@ -327,19 +414,22 @@ router.get("/inbox/:uploadId/media", async (req, res): Promise<void> => {
     const fileInfoUrl = new URL(telegramEndpoint(token, "getFile"));
     fileInfoUrl.searchParams.set("file_id", item.telegramFileId);
     const fileInfoResponse = await fetch(fileInfoUrl, {
+      headers: telegramRequestHeaders(),
       signal: AbortSignal.timeout(15_000),
     });
     const fileInfo = await readTelegramResult<{ file_path?: string }>(fileInfoResponse);
     const filePath = fileInfo.result?.file_path;
-    if (!fileInfoResponse.ok || !fileInfo.ok || !filePath || filePath.includes("..")) {
+    const mediaUrl = filePath ? telegramFileUrl(token, filePath) : null;
+    if (!fileInfoResponse.ok || !fileInfo.ok || !mediaUrl) {
       res.status(502).json({ error: "Telegram could not load this media item." });
       return;
     }
 
-    const mediaResponse = await fetch(
-      `https://api.telegram.org/file/bot${token}/${filePath}`,
-      { signal: AbortSignal.timeout(60_000) },
-    );
+    const range = req.header("range");
+    const mediaResponse = await fetch(mediaUrl, {
+      headers: telegramRequestHeaders(range ? { Range: range } : {}),
+      signal: AbortSignal.timeout(15 * 60 * 1000),
+    });
     if (!mediaResponse.ok) {
       res.status(502).json({ error: "Telegram could not load this media item." });
       return;
@@ -352,14 +442,21 @@ router.get("/inbox/:uploadId/media", async (req, res): Promise<void> => {
         : item.mediaType === "video"
           ? "video/mp4"
           : "image/jpeg";
-    const bytes = Buffer.from(await mediaResponse.arrayBuffer());
-    res
-      .setHeader("Content-Type", safeType)
-      .setHeader("Content-Length", String(bytes.byteLength))
-      .setHeader("Cache-Control", "private, max-age=3600")
-      .setHeader("X-Content-Type-Options", "nosniff")
-      .setHeader("Content-Disposition", "inline")
-      .send(bytes);
+    res.status(mediaResponse.status);
+    res.setHeader("Content-Type", safeType);
+    res.setHeader("Accept-Ranges", mediaResponse.headers.get("accept-ranges") ?? "bytes");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Disposition", "inline");
+    const contentLength = mediaResponse.headers.get("content-length");
+    const contentRange = mediaResponse.headers.get("content-range");
+    if (contentLength) res.setHeader("Content-Length", contentLength);
+    if (contentRange) res.setHeader("Content-Range", contentRange);
+    if (!mediaResponse.body) {
+      res.end();
+      return;
+    }
+    Readable.fromWeb(mediaResponse.body).pipe(res);
   } catch {
     res.status(502).json({ error: "Telegram could not load this media item." });
   }
@@ -370,6 +467,7 @@ router.post(
   limitUploadRate,
   requireTelegramReady,
   parseUploadBatch,
+  cleanupUploadedFiles,
   async (req, res): Promise<void> => {
     const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
     const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
@@ -385,16 +483,18 @@ router.post(
       return;
     }
     const caption = captionResult.data?.trim() ?? "";
-    if (files.length < 1 || files.length > MAX_FILES) {
-      res.status(400).json({ error: `Choose between 1 and ${MAX_FILES} photos or videos.` });
+    if (files.length !== MAX_FILES_PER_REQUEST) {
+      res.status(400).json({ error: "Upload exactly one photo or video per request." });
       return;
     }
     if (files.some((file) => !getMediaType(file))) {
       res.status(400).json({ error: "Only image and video files are supported." });
       return;
     }
-    if (files.reduce((total, file) => total + file.size, 0) > MAX_BATCH_SIZE) {
-      res.status(413).json({ error: "Keep each batch under 80 MB." });
+    if (files[0]!.size > MAX_REQUEST_SIZE) {
+      res.status(413).json({
+        error: `Each upload request must stay under ${Math.round(MAX_FILE_SIZE / (1024 * 1024))} MB.`,
+      });
       return;
     }
 
@@ -439,11 +539,12 @@ router.post(
       const body = new FormData();
       body.append("chat_id", chatId);
       if (caption) body.append("caption", caption);
+      const mediaBlob = await openAsBlob(file.path, {
+        type: file.mimetype || "application/octet-stream",
+      });
       body.append(
         field,
-        new Blob([new Uint8Array(file.buffer)], {
-          type: file.mimetype || "application/octet-stream",
-        }),
+        mediaBlob,
         file.originalname,
       );
 
@@ -456,8 +557,9 @@ router.post(
       try {
         const telegramResponse = await fetch(telegramEndpoint(token, method), {
           method: "POST",
+          headers: telegramRequestHeaders(),
           body,
-          signal: AbortSignal.timeout(120_000),
+          signal: AbortSignal.timeout(MAX_UPLOAD_TIMEOUT_MS),
         });
         telegramResult = await readTelegramResult(telegramResponse);
         if (!telegramResponse.ok || !telegramResult.ok) {

@@ -1,0 +1,14 @@
+{$TELEGRAM_API_DOMAIN} {
+	basic_auth {
+		{$TELEGRAM_API_USERNAME} {$TELEGRAM_API_PASSWORD_HASH}
+	}
+
+	handle_path /local-files/* {
+		root * /var/lib/telegram-bot-api
+		file_server
+	}
+
+	handle {
+		reverse_proxy telegram-bot-api:8081
+	}
+}

@@ -53,3 +53,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# External Telegram Bot API host credentials
+/infra/telegram-bot-api/.env
